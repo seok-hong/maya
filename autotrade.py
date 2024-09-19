@@ -7,6 +7,7 @@ from openai import OpenAI
 import ta
 from ta.utils import dropna
 import time
+import requests
 
 load_dotenv()
 
@@ -34,6 +35,45 @@ def add_indicators(df):
     return df
 
 
+def get_fear_and_greed_index():
+    url = "https://api.alternative.me/fng/"
+    response = requests.get(url)
+    if response.status_code == 200:
+        data = response.json()
+        return data['data'][0]
+    else:
+        print(f"Failed to fetch Fear and Greed Index. Status code: {response.status_code}")
+        return None
+
+
+def get_bitcoin_news():
+    serpapi_key = os.getenv("SERPAPI_API_KEY")
+    url = "https://serpapi.com/search.json"
+    params = {
+        "engine": "google_news",
+        "q": "bitcoin",
+        "api_key": serpapi_key
+    }
+
+    try:
+        response = requests.get(url, params=params)
+        response.raise_for_status()  # Raises a HTTPError if the status is 4xx, 5xx
+        data = response.json()
+
+        news_results = data.get("news_results", [])
+        headlines = []
+        for item in news_results:
+            headlines.append({
+                "title": item.get("title", ""),
+                "date": item.get("date", "")
+            })
+
+        return headlines[:5]  # 최신 5개의 뉴스 헤드라인만 반환
+    except requests.RequestException as e:
+        print(f"Error fetching news: {e}")
+        return []
+
+
 def ai_trading():
     # Upbit 객체 생성
     access = os.getenv("UPBIT_ACCESS_KEY")
@@ -48,15 +88,19 @@ def ai_trading():
     orderbook = pyupbit.get_orderbook("KRW-BTC")
 
     # 3. 차트 데이터 조회 및 보조지표 추가
-    # 30일 일봉 데이터
     df_daily = pyupbit.get_ohlcv("KRW-BTC", interval="day", count=30)
     df_daily = dropna(df_daily)
     df_daily = add_indicators(df_daily)
 
-    # 24시간 시간봉 데이터
     df_hourly = pyupbit.get_ohlcv("KRW-BTC", interval="minute60", count=24)
     df_hourly = dropna(df_hourly)
     df_hourly = add_indicators(df_hourly)
+
+    # 4. 공포 탐욕 지수 가져오기
+    fear_greed_index = get_fear_and_greed_index()
+
+    # 5. 뉴스 헤드라인 가져오기
+    news_headlines = get_bitcoin_news()
 
     # AI에게 데이터 제공하고 판단 받기
     client = OpenAI()
@@ -66,22 +110,30 @@ def ai_trading():
         messages=[
             {
                 "role": "system",
-                "content": """You are an expert in Bitcoin investing. Analyze the provided data including technical indicators and tell me whether to buy, sell, or hold at the moment. Consider the following indicators in your analysis:
-        - Bollinger Bands (bb_bbm, bb_bbh, bb_bbl)
-        - RSI (rsi)
-        - MACD (macd, macd_signal, macd_diff)
-        - Moving Averages (sma_20, ema_12)
-
-        Response in json format.
-
-        Response Example:
-        {"decision": "buy", "reason": "some technical reason"}
-        {"decision": "sell", "reason": "some technical reason"}
-        {"decision": "hold", "reason": "some technical reason"}"""
+                "content": """
+                    You are an expert in Bitcoin investing. Analyze the provided data including technical indicators, 
+                    market data, recent news headlines, and the Fear and Greed Index. Tell me whether to buy, sell, 
+                    or hold at the moment. Consider the following in your analysis:
+                        - Technical indicators and market data
+                        - Recent news headlines and their potential impact on Bitcoin price
+                        - The Fear and Greed Index and its implications
+                        - Overall market sentiment
+                    
+                    Response in json format.
+                        Response Example:
+                            {"decision": "buy", "reason": "some technical, fundamental, and sentiment-based reason"}
+                            {"decision": "sell", "reason": "some technical, fundamental, and sentiment-based reason"}
+                            {"decision": "hold", "reason": "some technical, fundamental, and sentiment-based reason"}"""
             },
             {
                 "role": "user",
-                "content": f"Current investment status: {json.dumps(filtered_balances)}\nOrderbook: {json.dumps(orderbook)}\nDaily OHLCV with indicators (30 days): {df_daily.to_json()}\nHourly OHLCV with indicators (24 hours): {df_hourly.to_json()}"
+                "content": f"""
+                    Current investment status: {json.dumps(filtered_balances)}
+                    Orderbook: {json.dumps(orderbook)}
+                    Daily OHLCV with indicators (30 days): {df_daily.to_json()}
+                    Hourly OHLCV with indicators (24 hours): {df_hourly.to_json()}
+                    Recent news headlines: {json.dumps(news_headlines)}
+                    Fear and Greed Index: {json.dumps(fear_greed_index)}"""
             }
         ],
         response_format={
